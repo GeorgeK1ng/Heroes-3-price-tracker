@@ -5,19 +5,20 @@ import json
 import math
 import os
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Optional
-from urllib.parse import urlparse
+from typing import Any, Optional
 
 import requests
+
+GAME_NAME = "Heroes of Might and Magic III Complete"
 
 URLS = {
     "GOG": "https://www.gog.com/en/game/heroes_of_might_and_magic_3_complete_edition",
     "Ubisoft": "https://store.ubisoft.com/ie/heroes-of-might-and-magic-iii--complete/575ffd9ba3be1633568b4d8c.html",
     "Epic": "https://store.epicgames.com/en-US/p/might-and-magic-heroes-3",
-    "Xbox": "https://www.xbox.com/games/store/heroes-of-might-and-magic-3-complete-edition/9P96BJ164SL8",
+    "Xbox": "https://www.xbox.com/en-US/games/store/heroes-of-might-and-magic-3-complete-edition/9P96BJ164SL8",
 }
 
 HEADERS = {
@@ -31,6 +32,13 @@ HEADERS = {
 }
 
 TIMEOUT = 30
+
+CURRENCY_SIGNS = {
+    "$": "USD",
+    "€": "EUR",
+    "£": "GBP",
+    "Kč": "CZK",
+}
 
 
 class ParseError(RuntimeError):
@@ -56,34 +64,32 @@ class Offer:
         return round(self.original_price - self.current_price, 2)
 
 
-CURRENCY_SIGNS = {
-    "$": "USD",
-    "€": "EUR",
-    "£": "GBP",
-    "Kč": "CZK",
-}
-
-
 def normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def parse_decimal(value: str) -> Optional[float]:
+def strip_tags(html: str) -> str:
+    return normalize_spaces(re.sub(r"<[^>]+>", " ", html))
+
+
+def parse_decimal(value: Any) -> Optional[float]:
     if value is None:
         return None
-    value = value.strip()
-    if not value:
+    text = str(value).strip()
+    if not text:
         return None
-    value = value.replace("\u00a0", " ").replace(" ", "")
-    if "," in value and "." in value:
-        if value.rfind(",") > value.rfind("."):
-            value = value.replace(".", "").replace(",", ".")
+
+    text = text.replace("\u00a0", " ").replace(" ", "")
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
         else:
-            value = value.replace(",", "")
-    elif "," in value:
-        value = value.replace(",", ".")
+            text = text.replace(",", "")
+    elif "," in text:
+        text = text.replace(",", ".")
+
     try:
-        return float(Decimal(value))
+        return float(Decimal(text))
     except (InvalidOperation, ValueError):
         return None
 
@@ -94,39 +100,48 @@ def parse_currency_from_text(text: str) -> Optional[str]:
     for sign, code in CURRENCY_SIGNS.items():
         if sign in text:
             return code
-    match = re.search(r'\b(USD|EUR|GBP|CZK)\b', text)
+    match = re.search(r"\b(USD|EUR|GBP|CZK)\b", text)
     return match.group(1) if match else None
 
 
 def extract_money_values(text: str) -> list[tuple[str, float]]:
-    pattern = re.compile(r'(?P<currency>[$€£]|Kč)\s*(?P<amount>\d{1,3}(?:[., ]\d{3})*(?:[.,]\d{2})|\d+(?:[.,]\d{2})?)')
+    pattern = re.compile(
+        r"(?P<currency>[$€£]|Kč|USD|EUR|GBP|CZK)\s*"
+        r"(?P<amount>\d{1,3}(?:[., ]\d{3})*(?:[.,]\d{2})|\d+(?:[.,]\d{2})?)"
+    )
     values: list[tuple[str, float]] = []
     for match in pattern.finditer(text):
         amount = parse_decimal(match.group("amount"))
         if amount is not None:
-            values.append((match.group("currency"), amount))
+            currency = match.group("currency")
+            values.append((currency, amount))
     return values
 
 
-def maybe_iso_datetime(value: str) -> Optional[str]:
+def maybe_iso_datetime(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
-    value = value.strip()
-    known_formats = [
+    raw = value.strip()
+    if not raw or raw == "<DATE>":
+        return raw if raw else None
+
+    candidates = [
         "%m/%d/%Y at %I:%M %p",
         "%m/%d/%Y, %I:%M %p",
         "%d/%m/%Y at %H:%M",
+        "%B %d, %Y %I:%M %p",
+        "%b %d, %Y %I:%M %p",
         "%Y-%m-%dT%H:%M:%SZ",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d",
     ]
-    for fmt in known_formats:
+    for fmt in candidates:
         try:
-            dt = datetime.strptime(value, fmt)
+            dt = datetime.strptime(raw, fmt)
             return dt.replace(tzinfo=timezone.utc).isoformat()
         except ValueError:
             continue
-    return value
+    return raw
 
 
 def fetch(url: str) -> str:
@@ -135,24 +150,53 @@ def fetch(url: str) -> str:
     return response.text
 
 
-def parse_gog(html: str, url: str) -> Offer:
-    text = normalize_spaces(re.sub(r"<[^>]+>", " ", html))
+def find_json_ld_blocks(html: str) -> list[Any]:
+    blocks: list[Any] = []
+    for match in re.finditer(
+        r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
+        html,
+        flags=re.DOTALL | re.IGNORECASE,
+    ):
+        raw = match.group(1).strip()
+        if not raw:
+            continue
+        try:
+            blocks.append(json.loads(raw))
+        except json.JSONDecodeError:
+            continue
+    return blocks
 
-    # Try JSON-ish data first.
+
+def walk_json(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for nested in value.values():
+            yield from walk_json(nested)
+    elif isinstance(value, list):
+        for item in value:
+            yield from walk_json(item)
+
+
+def parse_gog(html: str, url: str) -> Offer:
+    text = strip_tags(html)
     current = original = None
     discount = None
     currency = None
     sale_end = None
 
-    base_matches = re.findall(r'"baseAmount"\s*:\s*"?(\d+(?:\.\d+)?)"?', html)
-    final_matches = re.findall(r'"finalAmount"\s*:\s*"?(\d+(?:\.\d+)?)"?', html)
-    discount_matches = re.findall(r'"discount"\s*:\s*"?(\d+)"?', html)
+    final_matches = re.findall(r'"finalAmount"\s*:\s*"?([0-9.,]+)"?', html)
+    base_matches = re.findall(r'"baseAmount"\s*:\s*"?([0-9.,]+)"?', html)
+    discount_matches = re.findall(r'"discount"\s*:\s*"?([0-9]+)"?', html)
     currency_matches = re.findall(r'"currency"\s*:\s*"([A-Z]{3})"', html)
-    end_matches = re.findall(r'"(?:validTo|discountEndDate|priceTill|promotionEndDate)"\s*:\s*"([^"]+)"', html)
+    end_matches = re.findall(
+        r'"(?:validTo|discountEndDate|priceTill|promotionEndDate)"\s*:\s*"([^"]+)"',
+        html,
+    )
 
-    if base_matches and final_matches:
-        original = parse_decimal(base_matches[0])
+    if final_matches:
         current = parse_decimal(final_matches[0])
+    if base_matches:
+        original = parse_decimal(base_matches[0])
     if discount_matches:
         discount = int(discount_matches[0])
     if currency_matches:
@@ -160,21 +204,16 @@ def parse_gog(html: str, url: str) -> Offer:
     if end_matches:
         sale_end = maybe_iso_datetime(end_matches[0])
 
-    # Fallback to visible text patterns.
     if current is None:
-        money = extract_money_values(text)
-        if money:
-            currency = currency or CURRENCY_SIGNS.get(money[0][0])
-            current = money[0][1]
-            if len(money) > 1:
-                original = money[1][1]
+        paid_values = extract_money_values(text)
+        if paid_values:
+            currency = currency or CURRENCY_SIGNS.get(paid_values[0][0], paid_values[0][0])
+            current = paid_values[0][1]
+            if len(paid_values) > 1:
+                original = paid_values[1][1]
 
-    availability = "ok" if current is not None else "parser_warning"
-    notes = "Parsed from public product page"
-
-    if discount is None and current is not None and original:
-        if original > 0:
-            discount = int(round((1 - (current / original)) * 100))
+    if discount is None and current is not None and original and original > 0:
+        discount = int(round((1 - (current / original)) * 100))
 
     return Offer(
         store="GOG",
@@ -184,34 +223,35 @@ def parse_gog(html: str, url: str) -> Offer:
         original_price=original,
         discount_percent=discount,
         sale_end=sale_end,
-        availability=availability,
-        notes=notes,
+        availability="ok" if current is not None else "parser_warning",
+        notes="Parsed from public product page data.",
     )
 
 
 def parse_ubisoft(html: str, url: str) -> Offer:
-    text = normalize_spaces(re.sub(r"<[^>]+>", " ", html))
-
-    title_anchor = "Heroes of Might and Magic III"
-    idx = text.find(title_anchor)
-    window = text[idx: idx + 500] if idx != -1 else text
+    text = strip_tags(html)
+    anchor = "Heroes of Might and Magic III Complete Edition"
+    idx = text.find(anchor)
+    window = text[idx : idx + 800] if idx != -1 else text
 
     money = extract_money_values(window)
     current = money[0][1] if len(money) >= 1 else None
     original = money[1][1] if len(money) >= 2 else None
-    currency = CURRENCY_SIGNS.get(money[0][0]) if money else parse_currency_from_text(window)
+    currency = None
+    if money:
+        first_currency = money[0][0]
+        currency = CURRENCY_SIGNS.get(first_currency, first_currency)
+    else:
+        currency = parse_currency_from_text(window)
 
-    discount_match = re.search(r'-(\d{1,3})%', window)
+    discount_match = re.search(r"-(\d{1,3})%", window)
     discount = int(discount_match.group(1)) if discount_match else None
 
-    end_match = re.search(r'Ending on\s+([^\-€$£]+?)(?:\s+-\d{1,3}%|\s+[€$£])', window)
-    sale_end = maybe_iso_datetime(end_match.group(1).strip()) if end_match else None
+    end_match = re.search(r"Ending on\s+(.+?)(?:\s+-\d{1,3}%|\s+(?:[$€£]|USD|EUR|GBP|CZK))", window)
+    sale_end = maybe_iso_datetime(end_match.group(1)) if end_match else None
 
-    if discount is None and current is not None and original:
+    if discount is None and current is not None and original and original > 0:
         discount = int(round((1 - (current / original)) * 100))
-
-    availability = "ok" if current is not None else "parser_warning"
-    notes = "Parsed from visible product pricing block"
 
     return Offer(
         store="Ubisoft",
@@ -221,30 +261,64 @@ def parse_ubisoft(html: str, url: str) -> Offer:
         original_price=original,
         discount_percent=discount,
         sale_end=sale_end,
-        availability=availability,
-        notes=notes,
+        availability="ok" if current is not None else "parser_warning",
+        notes="Parsed from the visible product pricing block.",
     )
 
 
 def parse_epic(html: str, url: str) -> Offer:
-    text = normalize_spaces(re.sub(r"<[^>]+>", " ", html))
+    text = strip_tags(html)
 
-    # Epic page exposes a compact visible pricing block in the HTML.
-    match = re.search(
-        r'Base Game\s+-(?P<discount>\d{1,3})%\s+(?P<original>[£€$]\s*\d+(?:[.,]\d{2})?)\*?\s+(?P<current>[£€$]\s*\d+(?:[.,]\d{2})?)\s+Sale ends\s+(?P<ends>.+?)\s+Buy Now',
+    current = original = None
+    discount = None
+    currency = None
+    sale_end = None
+
+    visible_match = re.search(
+        r"Base Game\s+-(?P<discount>\d{1,3})%\s+"
+        r"(?P<original>(?:[$€£]|USD|EUR|GBP|CZK)\s*\d+(?:[.,]\d{2})?)\*?\s+"
+        r"(?P<current>(?:[$€£]|USD|EUR|GBP|CZK)\s*\d+(?:[.,]\d{2})?)\s+"
+        r"Sale ends\s+(?P<ends>.+?)\s+Buy Now",
         text,
+        flags=re.IGNORECASE,
     )
 
-    if not match:
-        raise ParseError("Epic pricing block not found")
+    if visible_match:
+        original_money = extract_money_values(visible_match.group("original"))
+        current_money = extract_money_values(visible_match.group("current"))
+        if original_money:
+            original = original_money[0][1]
+        if current_money:
+            current = current_money[0][1]
+            currency = CURRENCY_SIGNS.get(current_money[0][0], current_money[0][0])
+        discount = int(visible_match.group("discount"))
+        sale_end = maybe_iso_datetime(visible_match.group("ends"))
 
-    original_text = match.group("original")
-    current_text = match.group("current")
-    original = extract_money_values(original_text)[0][1]
-    current = extract_money_values(current_text)[0][1]
-    currency = CURRENCY_SIGNS.get(extract_money_values(current_text)[0][0])
-    discount = int(match.group("discount"))
-    sale_end = maybe_iso_datetime(match.group("ends"))
+    if current is None:
+        json_match = re.search(
+            r'"fmtPrice"\s*:\s*\{[^{}]*?"originalPrice"\s*:\s*"([^"]+)"[^{}]*?'
+            r'"discountPrice"\s*:\s*"([^"]+)"',
+            html,
+            flags=re.DOTALL,
+        )
+        if json_match:
+            original_values = extract_money_values(json_match.group(1))
+            current_values = extract_money_values(json_match.group(2))
+            if original_values:
+                original = original_values[0][1]
+            if current_values:
+                current = current_values[0][1]
+                currency = CURRENCY_SIGNS.get(current_values[0][0], current_values[0][0])
+
+        discount_match = re.search(r'"discount"\s*:\s*(\d+)', html)
+        if discount_match:
+            discount = int(discount_match.group(1))
+
+    if current is None:
+        raise ParseError("Epic pricing data not found")
+
+    if discount is None and current is not None and original and original > 0:
+        discount = int(round((1 - (current / original)) * 100))
 
     return Offer(
         store="Epic",
@@ -255,61 +329,79 @@ def parse_epic(html: str, url: str) -> Offer:
         discount_percent=discount,
         sale_end=sale_end,
         availability="ok",
-        notes="Parsed from visible Epic pricing block",
+        notes="Parsed from visible Epic source data.",
     )
 
 
 def parse_xbox(html: str, url: str) -> Offer:
-    text = normalize_spaces(re.sub(r"<[^>]+>", " ", html))
-
-    # Xbox often keeps the visible text sparse in non-browser requests.
-    # Try JSON-like fragments first.
-    currency = None
     current = original = None
     discount = None
+    currency = None
     sale_end = None
 
-    price_match = re.search(r'"price"\s*:\s*\{[^}]*"listPrice"\s*:\s*([0-9.]+)[^}]*"msrp"\s*:\s*([0-9.]+)[^}]*"currencyCode"\s*:\s*"([A-Z]{3})"', html)
-    if price_match:
-        current = parse_decimal(price_match.group(1))
-        original = parse_decimal(price_match.group(2))
-        currency = price_match.group(3)
+    # Prefer schema.org JSON-LD because it is stable in saved page source.
+    for block in find_json_ld_blocks(html):
+        for node in walk_json(block):
+            if not isinstance(node, dict):
+                continue
+            offers = node.get("offers")
+            if not isinstance(offers, list):
+                continue
+            paid_offers: list[dict[str, Any]] = []
+            for offer in offers:
+                if not isinstance(offer, dict):
+                    continue
+                price = parse_decimal(offer.get("price"))
+                if price is None or price <= 0:
+                    continue
+                paid_offers.append(offer)
+            if paid_offers:
+                primary = paid_offers[0]
+                current = parse_decimal(primary.get("price"))
+                currency = primary.get("priceCurrency")
+                break
+        if current is not None:
+            break
 
-    discount_match = re.search(r'"discountPercentage"\s*:\s*(\d+)', html)
-    if discount_match:
-        discount = int(discount_match.group(1))
-
-    end_match = re.search(r'"(?:endDate|saleEndDate|promotionEndDate)"\s*:\s*"([^"]+)"', html)
-    if end_match:
-        sale_end = maybe_iso_datetime(end_match.group(1))
-
-    # Last-resort text parsing if Xbox exposes visible text in the response.
     if current is None:
-        title_anchor = "Heroes of Might and Magic 3 - Complete Edition"
-        idx = text.find(title_anchor)
-        window = text[idx: idx + 400] if idx != -1 else text
-        money = extract_money_values(window)
-        if money:
-            current = money[0][1]
-            currency = CURRENCY_SIGNS.get(money[0][0])
-            if len(money) > 1:
-                original = money[1][1]
-        discount_text_match = re.search(r'-(\d{1,3})%', window)
-        if discount_text_match:
-            discount = int(discount_text_match.group(1))
-        end_text_match = re.search(r'(?:Sale ends|Ends in)\s+(.+?)(?:\s+[£€$]|\s+Buy|$)', window)
-        if end_text_match:
-            sale_end = maybe_iso_datetime(end_text_match.group(1))
+        preloaded_state_match = re.search(
+            r"window\.__PRELOADED_STATE__\s*=\s*(\{.*?\})\s*;</script>",
+            html,
+            flags=re.DOTALL,
+        )
+        if preloaded_state_match:
+            raw = preloaded_state_match.group(1)
+            try:
+                state = json.loads(raw)
+            except json.JSONDecodeError:
+                state = None
+            if state is not None:
+                for node in walk_json(state):
+                    if not isinstance(node, dict):
+                        continue
+                    price = node.get("price")
+                    if isinstance(price, dict):
+                        current = parse_decimal(
+                            price.get("listPrice")
+                            or price.get("price")
+                            or price.get("discountedPrice")
+                        )
+                        original = parse_decimal(price.get("msrp") or price.get("basePrice"))
+                        currency = price.get("currencyCode") or currency
+                        if current is not None:
+                            discount_value = price.get("discountPercentage")
+                            if discount_value is not None:
+                                discount = int(discount_value)
+                            break
 
-    availability = "ok" if current is not None else "parser_warning"
-    notes = (
-        "Xbox page may require selector updates because some pricing data is rendered dynamically"
-        if availability != "ok"
-        else "Parsed from product page data"
-    )
-
-    if discount is None and current is not None and original:
+    if discount is None and current is not None and original and original > 0:
         discount = int(round((1 - (current / original)) * 100))
+
+    notes = (
+        "Parsed from JSON-LD and preloaded state when available."
+        if current is not None
+        else "Xbox pricing was not found in the fetched HTML snapshot."
+    )
 
     return Offer(
         store="Xbox",
@@ -319,7 +411,7 @@ def parse_xbox(html: str, url: str) -> Offer:
         original_price=original,
         discount_percent=discount,
         sale_end=sale_end,
-        availability=availability,
+        availability="ok" if current is not None else "parser_warning",
         notes=notes,
     )
 
@@ -337,43 +429,40 @@ def fetch_offer(store: str, url: str) -> Offer:
     raise ValueError(f"Unsupported store: {store}")
 
 
-def sort_key(offer: Offer) -> tuple:
+def sort_key_price(offer: Offer) -> tuple[Any, ...]:
     current = offer.current_price if offer.current_price is not None else math.inf
     discount = -(offer.discount_percent if offer.discount_percent is not None else -1)
     original = offer.original_price if offer.original_price is not None else math.inf
     return (current, discount, original, offer.store.lower())
 
 
+def sort_key_discount(offer: Offer) -> tuple[Any, ...]:
+    discount = -(offer.discount_percent if offer.discount_percent is not None else -1)
+    current = offer.current_price if offer.current_price is not None else math.inf
+    return (discount, current, offer.store.lower())
+
+
 def format_money(value: Optional[float], currency: Optional[str]) -> str:
     if value is None:
         return "—"
-    code = currency or ""
-    return f"{value:.2f} {code}".strip()
+    return f"{value:.2f} {currency or ''}".strip()
 
 
 def format_discount(value: Optional[int]) -> str:
-    return f"-{value}%" if value is not None and value > 0 else ("0%" if value == 0 else "—")
+    if value is None:
+        return "—"
+    return f"-{value}%" if value > 0 else "0%"
 
 
 def format_sale_end(value: Optional[str]) -> str:
     return value or "—"
 
 
-def build_readme(offers: list[Offer], checked_at: str) -> str:
-    lines: list[str] = []
-    lines.append("# Heroes III Complete price tracker")
-    lines.append("")
-    lines.append(
-        "Automaticky generováno v GitHub Actions z veřejných produktových stránek pro "
-        "Heroes of Might and Magic III Complete."
-    )
-    lines.append("")
-    lines.append(f"**Poslední kontrola:** `{checked_at}`")
-    lines.append("")
-    lines.append("## Přehled")
-    lines.append("")
-    lines.append("| Store | Cena | Běžná cena | Sleva | Ušetříš | Konec slevy | Stav | Odkaz |")
-    lines.append("|---|---:|---:|---:|---:|---|---|---|")
+def render_table(offers: list[Offer]) -> list[str]:
+    lines = [
+        "| Store | Current price | Regular price | Discount | Savings | Sale ends | Status | Link |",
+        "|---|---:|---:|---:|---:|---|---|---|",
+    ]
     for offer in offers:
         lines.append(
             "| {store} | {current} | {original} | {discount} | {savings} | {sale_end} | {status} | [Open]({url}) |".format(
@@ -387,32 +476,63 @@ def build_readme(offers: list[Offer], checked_at: str) -> str:
                 url=offer.url,
             )
         )
+    return lines
 
+
+def build_readme(offers: list[Offer], checked_at: str, errors: list[str]) -> str:
+    by_price = sorted(offers, key=sort_key_price)
+    by_discount = sorted(offers, key=sort_key_discount)
+    best_price = next((offer for offer in by_price if offer.current_price is not None), None)
+    best_discount = next((offer for offer in by_discount if offer.discount_percent is not None), None)
+
+    lines: list[str] = []
+    lines.append(f"# {GAME_NAME} price tracker")
     lines.append("")
-    lines.append("## Pořadí")
+    lines.append("Automatically generated by GitHub Actions from public product pages.")
     lines.append("")
-    lines.append("- Primárně podle nejnižší aktuální ceny.")
-    lines.append("- Při shodě podle nejvyšší slevy.")
-    lines.append("- Pokud store nevrátí cenu, přesune se na konec tabulky a označí se jako `parser_warning`.")
+    lines.append(f"**Last checked:** `{checked_at}`")
     lines.append("")
-    lines.append("## Poznámky parseru")
+
+    if best_price is not None:
+        lines.append(
+            f"**Best current price:** {best_price.store} — {format_money(best_price.current_price, best_price.currency)}"
+        )
+    if best_discount is not None:
+        lines.append(
+            f"**Best discount:** {best_discount.store} — {format_discount(best_discount.discount_percent)}"
+        )
+    lines.append("")
+
+    lines.append("## Sorted by current price")
+    lines.append("")
+    lines.extend(render_table(by_price))
+    lines.append("")
+
+    lines.append("## Sorted by discount")
+    lines.append("")
+    lines.extend(render_table(by_discount))
+    lines.append("")
+
+    lines.append("## Parser notes")
     lines.append("")
     for offer in offers:
         lines.append(f"- **{offer.store}:** {offer.notes}")
+    if errors:
+        lines.append("")
+        lines.append("## Runtime errors")
+        lines.append("")
+        for error in errors:
+            lines.append(f"- `{error}`")
     lines.append("")
-    lines.append("## Raw JSON")
-    lines.append("")
+
     payload = {
         "checked_at": checked_at,
-        "game": "Heroes of Might and Magic III Complete",
-        "offers": [
-            {
-                **asdict(offer),
-                "savings": offer.savings,
-            }
-            for offer in offers
-        ],
+        "game": GAME_NAME,
+        "offers": [{**asdict(offer), "savings": offer.savings} for offer in offers],
+        "errors": errors,
     }
+    lines.append("## Raw JSON")
+    lines.append("")
     lines.append("```json")
     lines.append(json.dumps(payload, indent=2, ensure_ascii=False))
     lines.append("```")
@@ -429,7 +549,7 @@ def main() -> int:
         try:
             offers.append(fetch_offer(store, url))
         except Exception as exc:
-            errors.append(f"{store}: {exc}")
+            errors.append(f"{store}: {type(exc).__name__}: {exc}")
             offers.append(
                 Offer(
                     store=store,
@@ -444,32 +564,24 @@ def main() -> int:
                 )
             )
 
-    offers.sort(key=sort_key)
+    offers.sort(key=sort_key_price)
 
     os.makedirs("data", exist_ok=True)
     payload = {
         "checked_at": checked_at,
-        "game": "Heroes of Might and Magic III Complete",
-        "offers": [
-            {
-                **asdict(offer),
-                "savings": offer.savings,
-            }
-            for offer in offers
-        ],
+        "game": GAME_NAME,
+        "offers": [{**asdict(offer), "savings": offer.savings} for offer in offers],
         "errors": errors,
     }
-    with open("data/prices.json", "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, ensure_ascii=False)
-        fh.write("\n")
 
-    readme = build_readme(offers, checked_at)
-    with open("README.md", "w", encoding="utf-8") as fh:
-        fh.write(readme)
+    with open("data/prices.json", "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
 
-    # Fail only if every store failed.
-    successful = any(offer.current_price is not None for offer in offers)
-    if not successful:
+    with open("README.md", "w", encoding="utf-8") as handle:
+        handle.write(build_readme(offers, checked_at, errors))
+
+    if not any(offer.current_price is not None for offer in offers):
         raise SystemExit("No store returned a price; failing workflow.")
 
     return 0
