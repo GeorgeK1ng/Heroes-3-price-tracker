@@ -1,18 +1,18 @@
 {
-  "checked_at": "2026-04-09T07:53:59+00:00",
+  "checked_at": "2026-04-10T07:58:02+00:00",
   "game": "Heroes of Might and Magic III Complete",
   "offers": [
     {
       "store": "GOG",
       "url": "https://www.gog.com/en/game/heroes_of_might_and_magic_3_complete_edition",
       "currency": null,
-      "current_price": 9.99,
+      "current_price": 4.99,
       "original_price": 9.99,
-      "discount_percent": 0,
+      "discount_percent": 50,
       "sale_end": null,
       "availability": "ok",
       "notes": "Parsed from public product page data.",
-      "savings": 0.0
+      "savings": 5.0
     },
     {
       "store": "Xbox",
@@ -27,18 +27,6 @@
       "savings": null
     },
     {
-      "store": "Ubisoft",
-      "url": "https://store.ubisoft.com/ie/heroes-of-might-and-magic-iii--complete/575ffd9ba3be1633568b4d8c.html",
-      "currency": null,
-      "current_price": null,
-      "original_price": null,
-      "discount_percent": 75,
-      "sale_end": "&lt;DATE&gt;",
-      "availability": "parser_warning",
-      "notes": "Parsed from the visible product pricing block.",
-      "savings": null
-    },
-    {
       "store": "Epic",
       "url": "https://store.epicgames.com/en-US/p/might-and-magic-heroes-3",
       "currency": null,
@@ -48,6 +36,18 @@
       "sale_end": null,
       "availability": "error",
       "notes": "HTTPError: 403 Client Error: Forbidden for url: https://store.epicgames.com/en-US/p/might-and-magic-heroes-3",
+      "savings": null
+    },
+    {
+      "store": "Ubisoft",
+      "url": "https://store.ubisoft.com/ie/heroes-of-might-and-magic-iii--complete/575ffd9ba3be1633568b4d8c.html",
+      "currency": null,
+      "current_price": null,
+      "original_price": null,
+      "discount_percent": null,
+      "sale_end": null,
+      "availability": "parser_warning",
+      "notes": "Parsed from the visible product pricing block.",
       "savings": null
     }
   ],
