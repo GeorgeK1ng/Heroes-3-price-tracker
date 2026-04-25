@@ -1,13 +1,13 @@
 {
-  "checked_at": "2026-04-24T08:20:37+00:00",
+  "checked_at": "2026-04-25T07:44:16+00:00",
   "game": "Heroes of Might and Magic III Complete",
   "offers": [
     {
       "store": "GOG",
       "url": "https://www.gog.com/en/game/heroes_of_might_and_magic_3_complete_edition",
       "currency": null,
-      "current_price": 9.99,
-      "original_price": 9.99,
+      "current_price": 9.09,
+      "original_price": 9.09,
       "discount_percent": 0,
       "sale_end": null,
       "availability": "ok",
