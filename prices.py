@@ -138,6 +138,17 @@ def maybe_iso_datetime(value: Optional[str]) -> Optional[str]:
     if not raw or raw == "<DATE>":
         return raw if raw else None
 
+    yearless_candidates = ["%d %B at %H:%M", "%d %b at %H:%M"]
+    now = datetime.now(timezone.utc)
+    for fmt in yearless_candidates:
+        try:
+            dt = datetime.strptime(raw, fmt).replace(year=now.year, tzinfo=timezone.utc)
+            if dt < now:
+                dt = dt.replace(year=now.year + 1)
+            return dt.isoformat()
+        except ValueError:
+            continue
+
     candidates = [
         "%m/%d/%Y at %I:%M %p",
         "%m/%d/%Y, %I:%M %p",
@@ -291,6 +302,14 @@ def parse_ubisoft(html: str, url: str) -> Offer:
         flags=re.IGNORECASE,
     )
     sale_end = maybe_iso_datetime(end_match.group(1)) if end_match else None
+    if sale_end is None:
+        concise_end_match = re.search(
+            r"\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+at\s+\d{1,2}:\d{2})\b",
+            window,
+            flags=re.IGNORECASE,
+        )
+        if concise_end_match:
+            sale_end = maybe_iso_datetime(concise_end_match.group(1))
     if sale_end is None:
         sale_end_patterns = [
             r'"(?:endDate|saleEndDate|discountEndDate|promotionEndDate|validTo)"\s*:\s*"([^"]+)"',
@@ -606,7 +625,16 @@ def format_discount(value: Optional[int]) -> str:
 
 
 def format_sale_end(value: Optional[str]) -> str:
-    return value or "—"
+    if not value:
+        return "—"
+    try:
+        normalized = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%m.%d.%Y %H:%M UTC")
 
 
 def format_store(offer: Offer) -> str:
