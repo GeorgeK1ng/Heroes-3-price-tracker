@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
-import requests
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 GAME_NAME = "Heroes of Might and Magic III Complete"
 
@@ -32,6 +33,11 @@ HEADERS = {
 }
 
 TIMEOUT = 30
+
+EPIC_GRAPHQL_URL = "https://store.epicgames.com/graphql"
+EPIC_LOCALE = "en-US"
+EPIC_COUNTRY = "US"
+EPIC_PRODUCT_SLUG = "might-and-magic-heroes-3"
 
 CURRENCY_SIGNS = {
     "$": "USD",
@@ -145,9 +151,34 @@ def maybe_iso_datetime(value: Optional[str]) -> Optional[str]:
 
 
 def fetch(url: str) -> str:
-    response = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-    response.raise_for_status()
-    return response.text
+    request = urlrequest.Request(url, headers=HEADERS)
+    with urlrequest.urlopen(request, timeout=TIMEOUT) as response:
+        return response.read().decode(response.headers.get_content_charset() or "utf-8", errors="replace")
+
+
+def epic_graphql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+    headers = {
+        **HEADERS,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Origin": "https://store.epicgames.com",
+        "Referer": f"https://store.epicgames.com/{EPIC_LOCALE}/p/{EPIC_PRODUCT_SLUG}",
+    }
+    data = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+    request = urlrequest.Request(EPIC_GRAPHQL_URL, data=data, headers=headers, method="POST")
+    with urlrequest.urlopen(request, timeout=TIMEOUT) as response:
+        payload = json.loads(response.read().decode(response.headers.get_content_charset() or "utf-8"))
+    if payload.get("errors"):
+        messages = "; ".join(str(error.get("message", error)) for error in payload["errors"])
+        raise ParseError(f"Epic GraphQL returned errors: {messages}")
+    return payload
+
+
+def cents_to_money(value: Any, decimals: int = 2) -> Optional[float]:
+    amount = parse_decimal(value)
+    if amount is None:
+        return None
+    return round(amount / (10**decimals), decimals)
 
 
 def find_json_ld_blocks(html: str) -> list[Any]:
@@ -263,6 +294,97 @@ def parse_ubisoft(html: str, url: str) -> Offer:
         sale_end=sale_end,
         availability="ok" if current is not None else "parser_warning",
         notes="Parsed from the visible product pricing block.",
+    )
+
+
+def parse_epic_api(url: str) -> Offer:
+    query = """
+    query searchStoreQuery($country: String!, $locale: String, $keywords: String, $count: Int, $start: Int, $withPrice: Boolean = true, $withPromotions: Boolean = true) {
+      Catalog {
+        searchStore(country: $country, locale: $locale, keywords: $keywords, count: $count, start: $start) {
+          elements {
+            title
+            productSlug
+            urlSlug
+            price(country: $country) @include(if: $withPrice) {
+              totalPrice {
+                discountPrice
+                originalPrice
+                discount
+                currencyCode
+                currencyInfo { decimals }
+              }
+              lineOffers { appliedRules { endDate } }
+            }
+            promotions @include(if: $withPromotions) {
+              promotionalOffers { promotionalOffers { endDate discountSetting { discountPercentage } } }
+            }
+          }
+        }
+      }
+    }
+    """
+    payload = epic_graphql(
+        query,
+        {
+            "country": EPIC_COUNTRY,
+            "locale": EPIC_LOCALE,
+            "keywords": "Might & Magic Heroes 3",
+            "count": 10,
+            "start": 0,
+            "withPrice": True,
+            "withPromotions": True,
+        },
+    )
+    elements = payload.get("data", {}).get("Catalog", {}).get("searchStore", {}).get("elements", [])
+    offer = next(
+        (element for element in elements if element.get("productSlug") == EPIC_PRODUCT_SLUG or element.get("urlSlug") == EPIC_PRODUCT_SLUG),
+        elements[0] if elements else None,
+    )
+    if not isinstance(offer, dict):
+        raise ParseError("Epic GraphQL search returned no offers")
+
+    price = offer.get("price") or {}
+    total = price.get("totalPrice") or {}
+    decimals = int((total.get("currencyInfo") or {}).get("decimals") or 2)
+    current = cents_to_money(total.get("discountPrice"), decimals)
+    original = cents_to_money(total.get("originalPrice"), decimals)
+    currency = total.get("currencyCode")
+    discount_amount = cents_to_money(total.get("discount"), decimals)
+    discount = None
+    if original and original > 0 and discount_amount is not None:
+        discount = int(round((discount_amount / original) * 100))
+
+    sale_end = None
+    line_offers = price.get("lineOffers") or []
+    if isinstance(line_offers, dict):
+        line_offers = [line_offers]
+    for line_offer in line_offers:
+        if not isinstance(line_offer, dict):
+            continue
+        for rule in line_offer.get("appliedRules") or []:
+            sale_end = maybe_iso_datetime(rule.get("endDate"))
+            if sale_end:
+                break
+        if sale_end:
+            break
+
+    if current is None:
+        raise ParseError("Epic GraphQL pricing data not found")
+
+    if discount is None and current is not None and original and original > 0:
+        discount = int(round((1 - (current / original)) * 100))
+
+    return Offer(
+        store="Epic",
+        url=url,
+        currency=currency,
+        current_price=current,
+        original_price=original,
+        discount_percent=discount,
+        sale_end=sale_end,
+        availability="ok",
+        notes="Parsed from Epic GraphQL store data.",
     )
 
 
@@ -417,13 +539,18 @@ def parse_xbox(html: str, url: str) -> Offer:
 
 
 def fetch_offer(store: str, url: str) -> Offer:
+    if store == "Epic":
+        try:
+            html = fetch(url)
+            return parse_epic(html, url)
+        except (urlerror.URLError, ParseError):
+            return parse_epic_api(url)
+
     html = fetch(url)
     if store == "GOG":
         return parse_gog(html, url)
     if store == "Ubisoft":
         return parse_ubisoft(html, url)
-    if store == "Epic":
-        return parse_epic(html, url)
     if store == "Xbox":
         return parse_xbox(html, url)
     raise ValueError(f"Unsupported store: {store}")
