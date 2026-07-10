@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
-import requests
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 GAME_NAME = "Heroes of Might and Magic III Complete"
 
@@ -33,11 +34,23 @@ HEADERS = {
 
 TIMEOUT = 30
 
+EPIC_GRAPHQL_URL = "https://store.epicgames.com/graphql"
+EPIC_LOCALE = "en-US"
+EPIC_COUNTRY = "US"
+EPIC_PRODUCT_SLUG = "might-and-magic-heroes-3"
+
 CURRENCY_SIGNS = {
     "$": "USD",
     "€": "EUR",
     "£": "GBP",
     "Kč": "CZK",
+}
+
+STORE_LOGOS = {
+    "Epic": "https://cdn.simpleicons.org/epicgames/313131",
+    "GOG": "https://cdn.simpleicons.org/gogdotcom/86328A",
+    "Ubisoft": "https://cdn.simpleicons.org/ubisoft/000000",
+    "Xbox": "https://cdn.simpleicons.org/xbox/107C10",
 }
 
 
@@ -145,9 +158,34 @@ def maybe_iso_datetime(value: Optional[str]) -> Optional[str]:
 
 
 def fetch(url: str) -> str:
-    response = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-    response.raise_for_status()
-    return response.text
+    request = urlrequest.Request(url, headers=HEADERS)
+    with urlrequest.urlopen(request, timeout=TIMEOUT) as response:
+        return response.read().decode(response.headers.get_content_charset() or "utf-8", errors="replace")
+
+
+def epic_graphql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+    headers = {
+        **HEADERS,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Origin": "https://store.epicgames.com",
+        "Referer": f"https://store.epicgames.com/{EPIC_LOCALE}/p/{EPIC_PRODUCT_SLUG}",
+    }
+    data = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+    request = urlrequest.Request(EPIC_GRAPHQL_URL, data=data, headers=headers, method="POST")
+    with urlrequest.urlopen(request, timeout=TIMEOUT) as response:
+        payload = json.loads(response.read().decode(response.headers.get_content_charset() or "utf-8"))
+    if payload.get("errors"):
+        messages = "; ".join(str(error.get("message", error)) for error in payload["errors"])
+        raise ParseError(f"Epic GraphQL returned errors: {messages}")
+    return payload
+
+
+def cents_to_money(value: Any, decimals: int = 2) -> Optional[float]:
+    amount = parse_decimal(value)
+    if amount is None:
+        return None
+    return round(amount / (10**decimals), decimals)
 
 
 def find_json_ld_blocks(html: str) -> list[Any]:
@@ -263,6 +301,97 @@ def parse_ubisoft(html: str, url: str) -> Offer:
         sale_end=sale_end,
         availability="ok" if current is not None else "parser_warning",
         notes="Parsed from the visible product pricing block.",
+    )
+
+
+def parse_epic_api(url: str) -> Offer:
+    query = """
+    query searchStoreQuery($country: String!, $locale: String, $keywords: String, $count: Int, $start: Int, $withPrice: Boolean = true, $withPromotions: Boolean = true) {
+      Catalog {
+        searchStore(country: $country, locale: $locale, keywords: $keywords, count: $count, start: $start) {
+          elements {
+            title
+            productSlug
+            urlSlug
+            price(country: $country) @include(if: $withPrice) {
+              totalPrice {
+                discountPrice
+                originalPrice
+                discount
+                currencyCode
+                currencyInfo { decimals }
+              }
+              lineOffers { appliedRules { endDate } }
+            }
+            promotions @include(if: $withPromotions) {
+              promotionalOffers { promotionalOffers { endDate discountSetting { discountPercentage } } }
+            }
+          }
+        }
+      }
+    }
+    """
+    payload = epic_graphql(
+        query,
+        {
+            "country": EPIC_COUNTRY,
+            "locale": EPIC_LOCALE,
+            "keywords": "Might & Magic Heroes 3",
+            "count": 10,
+            "start": 0,
+            "withPrice": True,
+            "withPromotions": True,
+        },
+    )
+    elements = payload.get("data", {}).get("Catalog", {}).get("searchStore", {}).get("elements", [])
+    offer = next(
+        (element for element in elements if element.get("productSlug") == EPIC_PRODUCT_SLUG or element.get("urlSlug") == EPIC_PRODUCT_SLUG),
+        elements[0] if elements else None,
+    )
+    if not isinstance(offer, dict):
+        raise ParseError("Epic GraphQL search returned no offers")
+
+    price = offer.get("price") or {}
+    total = price.get("totalPrice") or {}
+    decimals = int((total.get("currencyInfo") or {}).get("decimals") or 2)
+    current = cents_to_money(total.get("discountPrice"), decimals)
+    original = cents_to_money(total.get("originalPrice"), decimals)
+    currency = total.get("currencyCode")
+    discount_amount = cents_to_money(total.get("discount"), decimals)
+    discount = None
+    if original and original > 0 and discount_amount is not None:
+        discount = int(round((discount_amount / original) * 100))
+
+    sale_end = None
+    line_offers = price.get("lineOffers") or []
+    if isinstance(line_offers, dict):
+        line_offers = [line_offers]
+    for line_offer in line_offers:
+        if not isinstance(line_offer, dict):
+            continue
+        for rule in line_offer.get("appliedRules") or []:
+            sale_end = maybe_iso_datetime(rule.get("endDate"))
+            if sale_end:
+                break
+        if sale_end:
+            break
+
+    if current is None:
+        raise ParseError("Epic GraphQL pricing data not found")
+
+    if discount is None and current is not None and original and original > 0:
+        discount = int(round((1 - (current / original)) * 100))
+
+    return Offer(
+        store="Epic",
+        url=url,
+        currency=currency,
+        current_price=current,
+        original_price=original,
+        discount_percent=discount,
+        sale_end=sale_end,
+        availability="ok",
+        notes="Parsed from Epic GraphQL store data.",
     )
 
 
@@ -417,13 +546,18 @@ def parse_xbox(html: str, url: str) -> Offer:
 
 
 def fetch_offer(store: str, url: str) -> Offer:
+    if store == "Epic":
+        try:
+            html = fetch(url)
+            return parse_epic(html, url)
+        except (urlerror.URLError, ParseError):
+            return parse_epic_api(url)
+
     html = fetch(url)
     if store == "GOG":
         return parse_gog(html, url)
     if store == "Ubisoft":
         return parse_ubisoft(html, url)
-    if store == "Epic":
-        return parse_epic(html, url)
     if store == "Xbox":
         return parse_xbox(html, url)
     raise ValueError(f"Unsupported store: {store}")
@@ -458,32 +592,35 @@ def format_sale_end(value: Optional[str]) -> str:
     return value or "—"
 
 
+def format_store(offer: Offer) -> str:
+    logo = STORE_LOGOS.get(offer.store)
+    label = f"[{offer.store}]({offer.url})"
+    if not logo:
+        return label
+    return f'<img src="{logo}" alt="" width="18" height="18"> {label}'
+
+
 def render_table(offers: list[Offer]) -> list[str]:
     lines = [
-        "| Store | Current price | Regular price | Discount | Savings | Sale ends | Status | Link |",
-        "|---|---:|---:|---:|---:|---|---|---|",
+        "| Store | Current price | Regular price | Discount | Savings | Sale ends |",
+        "|---|---:|---:|---:|---:|---|",
     ]
     for offer in offers:
         lines.append(
-            "| {store} | {current} | {original} | {discount} | {savings} | {sale_end} | {status} | [Open]({url}) |".format(
-                store=offer.store,
+            "| {store} | {current} | {original} | {discount} | {savings} | {sale_end} |".format(
+                store=format_store(offer),
                 current=format_money(offer.current_price, offer.currency),
                 original=format_money(offer.original_price, offer.currency),
                 discount=format_discount(offer.discount_percent),
                 savings=format_money(offer.savings, offer.currency),
                 sale_end=format_sale_end(offer.sale_end),
-                status=offer.availability,
-                url=offer.url,
             )
         )
     return lines
 
 
-def build_readme(offers: list[Offer], checked_at: str, errors: list[str]) -> str:
+def build_readme(offers: list[Offer], checked_at: str, _errors: list[str]) -> str:
     by_price = sorted(offers, key=sort_key_price)
-    by_discount = sorted(offers, key=sort_key_discount)
-    best_price = next((offer for offer in by_price if offer.current_price is not None), None)
-    best_discount = next((offer for offer in by_discount if offer.discount_percent is not None), None)
 
     lines: list[str] = []
     lines.append(f"# {GAME_NAME} price tracker")
@@ -492,50 +629,11 @@ def build_readme(offers: list[Offer], checked_at: str, errors: list[str]) -> str
     lines.append("")
     lines.append(f"**Last checked:** `{checked_at}`")
     lines.append("")
-
-    if best_price is not None:
-        lines.append(
-            f"**Best current price:** {best_price.store} — {format_money(best_price.current_price, best_price.currency)}"
-        )
-    if best_discount is not None:
-        lines.append(
-            f"**Best discount:** {best_discount.store} — {format_discount(best_discount.discount_percent)}"
-        )
-    lines.append("")
-
-    lines.append("## Sorted by current price")
+    lines.append("## Prices")
     lines.append("")
     lines.extend(render_table(by_price))
     lines.append("")
-
-    lines.append("## Sorted by discount")
-    lines.append("")
-    lines.extend(render_table(by_discount))
-    lines.append("")
-
-    lines.append("## Parser notes")
-    lines.append("")
-    for offer in offers:
-        lines.append(f"- **{offer.store}:** {offer.notes}")
-    if errors:
-        lines.append("")
-        lines.append("## Runtime errors")
-        lines.append("")
-        for error in errors:
-            lines.append(f"- `{error}`")
-    lines.append("")
-
-    payload = {
-        "checked_at": checked_at,
-        "game": GAME_NAME,
-        "offers": [{**asdict(offer), "savings": offer.savings} for offer in offers],
-        "errors": errors,
-    }
-    lines.append("## Raw JSON")
-    lines.append("")
-    lines.append("```json")
-    lines.append(json.dumps(payload, indent=2, ensure_ascii=False))
-    lines.append("```")
+    lines.append("Detailed parser notes and runtime errors are stored in `data/prices.json` and `logs/latest.json`.")
     lines.append("")
     return "\n".join(lines)
 
@@ -567,6 +665,7 @@ def main() -> int:
     offers.sort(key=sort_key_price)
 
     os.makedirs("data", exist_ok=True)
+    os.makedirs("logs", exist_ok=True)
     payload = {
         "checked_at": checked_at,
         "game": GAME_NAME,
@@ -575,6 +674,10 @@ def main() -> int:
     }
 
     with open("data/prices.json", "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+
+    with open("logs/latest.json", "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=False)
         handle.write("\n")
 
