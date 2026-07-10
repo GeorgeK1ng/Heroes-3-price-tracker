@@ -50,7 +50,7 @@ STORE_LOGOS = {
     "Epic": "https://cdn.simpleicons.org/epicgames/313131",
     "GOG": "https://cdn.simpleicons.org/gogdotcom/86328A",
     "Ubisoft": "https://cdn.simpleicons.org/ubisoft/000000",
-    "Xbox": "https://cdn.simpleicons.org/xbox/107C10",
+    "Xbox": "assets/xbox.svg",
 }
 
 
@@ -285,8 +285,25 @@ def parse_ubisoft(html: str, url: str) -> Offer:
     discount_match = re.search(r"-(\d{1,3})%", window)
     discount = int(discount_match.group(1)) if discount_match else None
 
-    end_match = re.search(r"Ending on\s+(.+?)(?:\s+-\d{1,3}%|\s+(?:[$€£]|USD|EUR|GBP|CZK))", window)
+    end_match = re.search(
+        r"(?:Ending|Ends?|Offer ends)\s+on\s+(.+?)(?:\s+-\d{1,3}%|\s+(?:[$€£]|USD|EUR|GBP|CZK)|$)",
+        window,
+        flags=re.IGNORECASE,
+    )
     sale_end = maybe_iso_datetime(end_match.group(1)) if end_match else None
+    if sale_end is None:
+        sale_end_patterns = [
+            r'"(?:endDate|saleEndDate|discountEndDate|promotionEndDate|validTo)"\s*:\s*"([^"]+)"',
+            r'"(?:endDate|saleEndDate|discountEndDate|promotionEndDate|validTo)"\s*,\s*"value"\s*:\s*"([^"]+)"',
+            r'(?:data-end-date|data-sale-end-date)=["\']([^"\']+)["\']',
+        ]
+        for pattern in sale_end_patterns:
+            for candidate in re.findall(pattern, html, flags=re.IGNORECASE):
+                sale_end = maybe_iso_datetime(candidate)
+                if sale_end:
+                    break
+            if sale_end:
+                break
 
     if discount is None and current is not None and original and original > 0:
         discount = int(round((1 - (current / original)) * 100))
@@ -638,15 +655,53 @@ def build_readme(offers: list[Offer], checked_at: str, _errors: list[str]) -> st
     return "\n".join(lines)
 
 
+def load_cached_offers(path: str = "data/prices.json") -> dict[str, Offer]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    cached: dict[str, Offer] = {}
+    for raw_offer in payload.get("offers", []):
+        if not isinstance(raw_offer, dict):
+            continue
+        store = raw_offer.get("store")
+        url = raw_offer.get("url") or URLS.get(store)
+        if not store or not url:
+            continue
+        cached[store] = Offer(
+            store=store,
+            url=url,
+            currency=raw_offer.get("currency"),
+            current_price=raw_offer.get("current_price"),
+            original_price=raw_offer.get("original_price"),
+            discount_percent=raw_offer.get("discount_percent"),
+            sale_end=raw_offer.get("sale_end"),
+            availability=raw_offer.get("availability") or "cached",
+            notes=raw_offer.get("notes") or "Reused the last successful value because the live store request was blocked.",
+        )
+    return cached
+
+
+def is_transient_forbidden(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "403" in text or "forbidden" in text
+
 def main() -> int:
     checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     offers: list[Offer] = []
     errors: list[str] = []
+    cached_offers = load_cached_offers()
 
     for store, url in URLS.items():
         try:
             offers.append(fetch_offer(store, url))
         except Exception as exc:
+            cached_offer = cached_offers.get(store)
+            if cached_offer is not None and is_transient_forbidden(exc):
+                offers.append(cached_offer)
+                continue
             errors.append(f"{store}: {type(exc).__name__}: {exc}")
             offers.append(
                 Offer(
