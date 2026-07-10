@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-07-09T09:55:41+00:00",
+  "checked_at": "2026-07-10T05:56:19+00:00",
   "game": "Heroes of Might and Magic III Complete",
   "offers": [
     {
@@ -13,6 +13,18 @@
       "availability": "ok",
       "notes": "Parsed from the visible product pricing block.",
       "savings": 7.49
+    },
+    {
+      "store": "Epic",
+      "url": "https://store.epicgames.com/en-US/p/might-and-magic-heroes-3",
+      "currency": "USD",
+      "current_price": 9.99,
+      "original_price": 9.99,
+      "discount_percent": 0,
+      "sale_end": null,
+      "availability": "ok",
+      "notes": "Parsed from Epic GraphQL store data.",
+      "savings": 0.0
     },
     {
       "store": "GOG",
@@ -37,21 +49,7 @@
       "availability": "ok",
       "notes": "Parsed from JSON-LD and preloaded state when available.",
       "savings": null
-    },
-    {
-      "store": "Epic",
-      "url": "https://store.epicgames.com/en-US/p/might-and-magic-heroes-3",
-      "currency": null,
-      "current_price": null,
-      "original_price": null,
-      "discount_percent": null,
-      "sale_end": null,
-      "availability": "error",
-      "notes": "HTTPError: 403 Client Error: Forbidden for url: https://store.epicgames.com/en-US/p/might-and-magic-heroes-3",
-      "savings": null
     }
   ],
-  "errors": [
-    "Epic: HTTPError: 403 Client Error: Forbidden for url: https://store.epicgames.com/en-US/p/might-and-magic-heroes-3"
-  ]
+  "errors": []
 }

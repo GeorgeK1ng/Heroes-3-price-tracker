@@ -50,7 +50,7 @@ STORE_LOGOS = {
     "Epic": "https://cdn.simpleicons.org/epicgames/313131",
     "GOG": "https://cdn.simpleicons.org/gogdotcom/86328A",
     "Ubisoft": "https://cdn.simpleicons.org/ubisoft/000000",
-    "Xbox": "https://cdn.simpleicons.org/xbox/107C10",
+    "Xbox": "assets/xbox.svg",
 }
 
 
@@ -137,6 +137,17 @@ def maybe_iso_datetime(value: Optional[str]) -> Optional[str]:
     raw = value.strip()
     if not raw or raw == "<DATE>":
         return raw if raw else None
+
+    yearless_candidates = ["%d %B at %H:%M", "%d %b at %H:%M"]
+    now = datetime.now(timezone.utc)
+    for fmt in yearless_candidates:
+        try:
+            dt = datetime.strptime(raw, fmt).replace(year=now.year, tzinfo=timezone.utc)
+            if dt < now:
+                dt = dt.replace(year=now.year + 1)
+            return dt.isoformat()
+        except ValueError:
+            continue
 
     candidates = [
         "%m/%d/%Y at %I:%M %p",
@@ -285,8 +296,33 @@ def parse_ubisoft(html: str, url: str) -> Offer:
     discount_match = re.search(r"-(\d{1,3})%", window)
     discount = int(discount_match.group(1)) if discount_match else None
 
-    end_match = re.search(r"Ending on\s+(.+?)(?:\s+-\d{1,3}%|\s+(?:[$€£]|USD|EUR|GBP|CZK))", window)
+    end_match = re.search(
+        r"(?:Ending|Ends?|Offer ends)\s+on\s+(.+?)(?:\s+-\d{1,3}%|\s+(?:[$€£]|USD|EUR|GBP|CZK)|$)",
+        window,
+        flags=re.IGNORECASE,
+    )
     sale_end = maybe_iso_datetime(end_match.group(1)) if end_match else None
+    if sale_end is None:
+        concise_end_match = re.search(
+            r"\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+at\s+\d{1,2}:\d{2})\b",
+            window,
+            flags=re.IGNORECASE,
+        )
+        if concise_end_match:
+            sale_end = maybe_iso_datetime(concise_end_match.group(1))
+    if sale_end is None:
+        sale_end_patterns = [
+            r'"(?:endDate|saleEndDate|discountEndDate|promotionEndDate|validTo)"\s*:\s*"([^"]+)"',
+            r'"(?:endDate|saleEndDate|discountEndDate|promotionEndDate|validTo)"\s*,\s*"value"\s*:\s*"([^"]+)"',
+            r'(?:data-end-date|data-sale-end-date)=["\']([^"\']+)["\']',
+        ]
+        for pattern in sale_end_patterns:
+            for candidate in re.findall(pattern, html, flags=re.IGNORECASE):
+                sale_end = maybe_iso_datetime(candidate)
+                if sale_end:
+                    break
+            if sale_end:
+                break
 
     if discount is None and current is not None and original and original > 0:
         discount = int(round((1 - (current / original)) * 100))
@@ -548,10 +584,10 @@ def parse_xbox(html: str, url: str) -> Offer:
 def fetch_offer(store: str, url: str) -> Offer:
     if store == "Epic":
         try:
+            return parse_epic_api(url)
+        except (urlerror.URLError, ParseError):
             html = fetch(url)
             return parse_epic(html, url)
-        except (urlerror.URLError, ParseError):
-            return parse_epic_api(url)
 
     html = fetch(url)
     if store == "GOG":
@@ -589,7 +625,16 @@ def format_discount(value: Optional[int]) -> str:
 
 
 def format_sale_end(value: Optional[str]) -> str:
-    return value or "—"
+    if not value:
+        return "—"
+    try:
+        normalized = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%m.%d.%Y %H:%M UTC")
 
 
 def format_store(offer: Offer) -> str:
