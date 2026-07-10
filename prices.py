@@ -50,7 +50,7 @@ STORE_LOGOS = {
     "Epic": "https://cdn.simpleicons.org/epicgames/313131",
     "GOG": "https://cdn.simpleicons.org/gogdotcom/86328A",
     "Ubisoft": "https://cdn.simpleicons.org/ubisoft/000000",
-    "Xbox": "https://cdn.simpleicons.org/xbox/107C10",
+    "Xbox": "assets/xbox.svg",
 }
 
 
@@ -285,8 +285,25 @@ def parse_ubisoft(html: str, url: str) -> Offer:
     discount_match = re.search(r"-(\d{1,3})%", window)
     discount = int(discount_match.group(1)) if discount_match else None
 
-    end_match = re.search(r"Ending on\s+(.+?)(?:\s+-\d{1,3}%|\s+(?:[$€£]|USD|EUR|GBP|CZK))", window)
+    end_match = re.search(
+        r"(?:Ending|Ends?|Offer ends)\s+on\s+(.+?)(?:\s+-\d{1,3}%|\s+(?:[$€£]|USD|EUR|GBP|CZK)|$)",
+        window,
+        flags=re.IGNORECASE,
+    )
     sale_end = maybe_iso_datetime(end_match.group(1)) if end_match else None
+    if sale_end is None:
+        sale_end_patterns = [
+            r'"(?:endDate|saleEndDate|discountEndDate|promotionEndDate|validTo)"\s*:\s*"([^"]+)"',
+            r'"(?:endDate|saleEndDate|discountEndDate|promotionEndDate|validTo)"\s*,\s*"value"\s*:\s*"([^"]+)"',
+            r'(?:data-end-date|data-sale-end-date)=["\']([^"\']+)["\']',
+        ]
+        for pattern in sale_end_patterns:
+            for candidate in re.findall(pattern, html, flags=re.IGNORECASE):
+                sale_end = maybe_iso_datetime(candidate)
+                if sale_end:
+                    break
+            if sale_end:
+                break
 
     if discount is None and current is not None and original and original > 0:
         discount = int(round((1 - (current / original)) * 100))
@@ -548,10 +565,10 @@ def parse_xbox(html: str, url: str) -> Offer:
 def fetch_offer(store: str, url: str) -> Offer:
     if store == "Epic":
         try:
+            return parse_epic_api(url)
+        except (urlerror.URLError, ParseError):
             html = fetch(url)
             return parse_epic(html, url)
-        except (urlerror.URLError, ParseError):
-            return parse_epic_api(url)
 
     html = fetch(url)
     if store == "GOG":
