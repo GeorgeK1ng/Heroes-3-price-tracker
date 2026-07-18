@@ -89,3 +89,50 @@ def test_parse_xbox_catalog_ignores_non_promotional_availability_end_date():
     parsed = datetime.fromisoformat(offer.sale_end)
     assert parsed.year != 9998
     assert 1.99 <= (parsed - before).total_seconds() / 86400 <= 2.01
+
+
+def test_parse_xbox_catalog_prefers_public_sale_savings_over_member_price():
+    payload = {
+        "Products": [
+            {
+                "DisplaySkuAvailabilities": [
+                    {
+                        "Availabilities": [
+                            {
+                                "OrderManagementData": {
+                                    "Price": {
+                                        "ListPrice": 2.49,
+                                        "DiscountedPrice": 1.74,
+                                        "CurrencyCode": "USD",
+                                    }
+                                },
+                                "Properties": {
+                                    "PromotionDescription": "On sale: save $0.75"
+                                },
+                            },
+                            {
+                                "OrderManagementData": {
+                                    "Price": {
+                                        "ListPrice": 9.99,
+                                        "DiscountedPrice": 2.49,
+                                        "CurrencyCode": "USD",
+                                    }
+                                },
+                                "Properties": {
+                                    "PromotionDescription": "On sale: save $7.50, ends in 2 days"
+                                },
+                            },
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+
+    offer = parse_xbox_catalog(payload, "https://www.xbox.com/example")
+
+    assert offer.current_price == 2.49
+    assert offer.original_price == 9.99
+    assert offer.discount_percent == 75
+    assert offer.savings == 7.5
+    assert offer.sale_end is not None
