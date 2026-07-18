@@ -1,18 +1,18 @@
 {
-  "checked_at": "2026-07-18T08:05:44+00:00",
+  "checked_at": "2026-07-18T14:49:19+00:00",
   "game": "Heroes of Might and Magic III Complete",
   "offers": [
     {
       "store": "Xbox",
       "url": "https://www.xbox.com/en-US/games/store/heroes-of-might-and-magic-3-complete-edition/9P96BJ164SL8",
       "currency": "USD",
-      "current_price": 2.49,
-      "original_price": 9.99,
-      "discount_percent": 75,
+      "current_price": 1.74,
+      "original_price": 2.49,
+      "discount_percent": 30,
       "sale_end": null,
       "availability": "ok",
       "notes": "Parsed from Microsoft Display Catalog API.",
-      "savings": 7.5
+      "savings": 0.75
     },
     {
       "store": "Ubisoft",
@@ -33,7 +33,7 @@
       "current_price": 4.99,
       "original_price": 9.99,
       "discount_percent": 50,
-      "sale_end": null,
+      "sale_end": "07/30/2026 09:59 EEST",
       "availability": "ok",
       "notes": "Parsed from public product page data.",
       "savings": 5.0
