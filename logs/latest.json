@@ -3,13 +3,25 @@
   "game": "Heroes of Might and Magic III Complete",
   "offers": [
     {
+      "store": "Xbox",
+      "url": "https://www.xbox.com/en-US/games/store/heroes-of-might-and-magic-3-complete-edition/9P96BJ164SL8",
+      "currency": "USD",
+      "current_price": 2.49,
+      "original_price": 9.99,
+      "discount_percent": 75,
+      "sale_end": null,
+      "availability": "ok",
+      "notes": "Parsed from Microsoft Display Catalog API.",
+      "savings": 7.5
+    },
+    {
       "store": "Ubisoft",
       "url": "https://store.ubisoft.com/ie/heroes-of-might-and-magic-iii--complete/575ffd9ba3be1633568b4d8c.html",
       "currency": "USD",
       "current_price": 2.5,
       "original_price": 9.99,
       "discount_percent": 75,
-      "sale_end": "23 July at 10:00 US$17.99 / month with Ubisoft+ Premium Select edition About this game The pack includes the original &quot;Heroes of Might and Magic III&quot;, and its two expansions: “Armageddon&#39;s Blade” and “The Shadow of Death”. Release Date : 28 February 1999 Platform : PC Genre : RPG {\"@context\":\"https://schema.org\",\"@type\":\"Product\",\"name\":\"Heroes of Might and Magic III Complete Edition\",\"url\":\"https://www.ubisoft.com/en-gb/games/heroes-of-might-and-magic-iii/editions/complete\",\"image\":\"https://staticctf.ubisoft.com/J3yJr34U2pZ2Ieem48Dwy9uqj5PNUQTn/2SgyEuIN0qfmEBV0IkBuPb/07400c482a26b4d826160f0c31cfbebe/MM3C.jpg\",\"description\":\"The pack includes the original \\\"Heroes of Might and Magic III\\\", and its t",
+      "sale_end": "2026-07-23T10:00:00+00:00",
       "availability": "ok",
       "notes": "Parsed from the visible product pricing block.",
       "savings": 7.49
@@ -37,18 +49,6 @@
       "availability": "ok",
       "notes": "Parsed from Epic GraphQL store data.",
       "savings": 0.0
-    },
-    {
-      "store": "Xbox",
-      "url": "https://www.xbox.com/en-US/games/store/heroes-of-might-and-magic-3-complete-edition/9P96BJ164SL8",
-      "currency": null,
-      "current_price": null,
-      "original_price": null,
-      "discount_percent": null,
-      "sale_end": null,
-      "availability": "parser_warning",
-      "notes": "Xbox pricing was not found in the fetched HTML snapshot.",
-      "savings": null
     }
   ],
   "errors": []
