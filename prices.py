@@ -6,7 +6,7 @@ import math
 import os
 import re
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
@@ -33,6 +33,13 @@ HEADERS = {
 }
 
 TIMEOUT = 30
+
+TIMEZONE_ABBREVIATIONS = {
+    "EEST": timezone(timedelta(hours=3)),
+    "EET": timezone(timedelta(hours=2)),
+    "UTC": timezone.utc,
+    "GMT": timezone.utc,
+}
 
 EPIC_GRAPHQL_URL = "https://store.epicgames.com/graphql"
 EPIC_LOCALE = "en-US"
@@ -142,18 +149,55 @@ def maybe_iso_datetime(value: Optional[str]) -> Optional[str]:
     if not raw or raw == "<DATE>":
         return raw if raw else None
 
+    label_match = re.search(
+        r"(?:Offer\s+ends\s+on|Ends?\s+on|Ending\s+on|Sale\s+ends)\s*:?\s*(.+)",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if label_match:
+        raw = label_match.group(1).strip()
+
+    relative_match = re.search(
+        r"\bends?\s+in\s+(\d+)\s+(minute|minutes|hour|hours|day|days|week|weeks)\b",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if relative_match:
+        amount = int(relative_match.group(1))
+        unit = relative_match.group(2).lower()
+        if unit.startswith("minute"):
+            delta = timedelta(minutes=amount)
+        elif unit.startswith("hour"):
+            delta = timedelta(hours=amount)
+        elif unit.startswith("week"):
+            delta = timedelta(weeks=amount)
+        else:
+            delta = timedelta(days=amount)
+        return (datetime.now(timezone.utc).replace(microsecond=0) + delta).isoformat()
+
+    tz_match = re.search(r"\s+([A-Z]{2,5})$", raw)
+    tzinfo = TIMEZONE_ABBREVIATIONS.get(tz_match.group(1)) if tz_match else None
+    raw_without_tz = raw[: tz_match.start()].strip() if tzinfo else raw
+
     yearless_candidates = ["%d %B at %H:%M", "%d %b at %H:%M"]
     now = datetime.now(timezone.utc)
-    for fmt in yearless_candidates:
-        try:
-            dt = datetime.strptime(raw, fmt).replace(year=now.year, tzinfo=timezone.utc)
-            if dt < now:
-                dt = dt.replace(year=now.year + 1)
-            return dt.isoformat()
-        except ValueError:
-            continue
+    if re.search(
+        r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December|"
+        r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\b",
+        raw_without_tz,
+        flags=re.IGNORECASE,
+    ):
+        for fmt in yearless_candidates:
+            try:
+                dt = datetime.strptime(raw_without_tz, fmt).replace(year=now.year, tzinfo=timezone.utc)
+                if dt < now:
+                    dt = dt.replace(year=now.year + 1)
+                return dt.isoformat()
+            except ValueError:
+                continue
 
     candidates = [
+        "%d/%m/%Y %H:%M",
         "%m/%d/%Y at %I:%M %p",
         "%m/%d/%Y, %I:%M %p",
         "%d/%m/%Y at %H:%M",
@@ -165,11 +209,37 @@ def maybe_iso_datetime(value: Optional[str]) -> Optional[str]:
     ]
     for fmt in candidates:
         try:
-            dt = datetime.strptime(raw, fmt)
-            return dt.replace(tzinfo=timezone.utc).isoformat()
+            dt = datetime.strptime(raw_without_tz, fmt)
+            return dt.replace(tzinfo=tzinfo or timezone.utc).astimezone(timezone.utc).isoformat()
         except ValueError:
             continue
     return raw
+
+
+def find_sale_end_datetime(value: Any) -> Optional[str]:
+    date_key_pattern = re.compile(r"(?:end|validto|expire|expiration)", flags=re.IGNORECASE)
+    text_end_pattern = re.compile(
+        r"(?:Offer\s+ends\s+on|Ends?\s+on|Ending\s+on|Sale\s+ends|ends?\s+in)\s*:?\s*"
+        r"([^.;|<>{}\[\]]+)",
+        flags=re.IGNORECASE,
+    )
+
+    for node in walk_json(value):
+        if not isinstance(node, dict):
+            continue
+        for key, raw_value in node.items():
+            if date_key_pattern.search(key) and isinstance(raw_value, str):
+                parsed = maybe_iso_datetime(raw_value)
+                if parsed:
+                    return parsed
+            if isinstance(raw_value, str):
+                match = text_end_pattern.search(raw_value)
+                if match:
+                    prefix = "ends in " if raw_value[match.start() :].lower().startswith("ends in") else ""
+                    parsed = maybe_iso_datetime(prefix + match.group(1).strip())
+                    if parsed:
+                        return parsed
+    return None
 
 
 def fetch_json(url: str) -> dict[str, Any]:
@@ -245,6 +315,16 @@ def parse_gog(html: str, url: str) -> Offer:
         currency = currency_matches[0]
     if end_matches:
         sale_end = maybe_iso_datetime(end_matches[0])
+
+    if sale_end is None:
+        text_end_match = re.search(
+            r"Offer\s+ends\s+on\s*:?\s*"
+            r"(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?:\s+[A-Z]{2,5})?)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if text_end_match:
+            sale_end = maybe_iso_datetime(text_end_match.group(1))
 
     if current is None:
         paid_values = extract_money_values(text)
@@ -560,7 +640,7 @@ def parse_xbox_catalog(payload: dict[str, Any], url: str) -> Offer:
     if best_offer is None:
         raise ParseError("Xbox catalog API pricing data not found")
 
-    best_price, _best_availability, discount, current = best_offer
+    best_price, best_availability, discount, current = best_offer
     original = parse_decimal(best_price.get("ListPrice"))
     if original is None or original < current:
         original = parse_decimal(best_price.get("MSRP") or best_price.get("StrikethroughPrice"))
@@ -570,6 +650,7 @@ def parse_xbox_catalog(payload: dict[str, Any], url: str) -> Offer:
         discount = int(round((1 - (current / original)) * 100))
     if original is None and current is not None and discount and discount < 100:
         original = round(current / (1 - discount / 100), 2)
+    sale_end = find_sale_end_datetime(best_availability)
 
     return Offer(
         store="Xbox",
@@ -578,7 +659,7 @@ def parse_xbox_catalog(payload: dict[str, Any], url: str) -> Offer:
         current_price=current,
         original_price=original,
         discount_percent=discount,
-        sale_end=None,
+        sale_end=sale_end,
         availability="ok",
         notes="Parsed from Microsoft Display Catalog API.",
     )
