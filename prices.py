@@ -597,6 +597,28 @@ def find_discount_percent(value: Any) -> Optional[int]:
     return None
 
 
+def find_promotional_savings(value: Any) -> Optional[float]:
+    saving_pattern = re.compile(
+        r"\b(?:save|savings?)\s+"
+        r"(?P<money>(?:[$€£]|Kč|USD|EUR|GBP|CZK)\s*"
+        r"\d{1,3}(?:[., ]\d{3})*(?:[.,]\d{2})|"
+        r"(?:[$€£]|Kč|USD|EUR|GBP|CZK)\s*\d+(?:[.,]\d{2})?)",
+        flags=re.IGNORECASE,
+    )
+    for node in walk_json(value):
+        if not isinstance(node, dict):
+            continue
+        for raw_value in node.values():
+            if not isinstance(raw_value, str):
+                continue
+            match = saving_pattern.search(raw_value)
+            if not match:
+                continue
+            money = extract_money_values(match.group("money"))
+            if money:
+                return money[0][1]
+    return None
+
 def xbox_catalog_api(product_id: str = XBOX_PRODUCT_ID) -> dict[str, Any]:
     url = (
         "https://displaycatalog.mp.microsoft.com/v7.0/products"
@@ -608,7 +630,7 @@ def xbox_catalog_api(product_id: str = XBOX_PRODUCT_ID) -> dict[str, Any]:
 def parse_xbox_catalog(payload: dict[str, Any], url: str) -> Offer:
     products = payload.get("Products") or []
     product = products[0] if products and isinstance(products[0], dict) else {}
-    best_offer: Optional[tuple[dict[str, Any], dict[str, Any], Optional[int], float]] = None
+    best_offer: Optional[tuple[tuple[float, float, float], dict[str, Any], dict[str, Any], Optional[int], float, Optional[float]]] = None
 
     for sku in product.get("DisplaySkuAvailabilities") or []:
         if not isinstance(sku, dict):
@@ -620,7 +642,8 @@ def parse_xbox_catalog(payload: dict[str, Any], url: str) -> Offer:
             if not isinstance(price, dict):
                 continue
 
-            original = parse_decimal(price.get("ListPrice") or price.get("MSRP"))
+            list_price = parse_decimal(price.get("ListPrice"))
+            msrp = parse_decimal(price.get("MSRP") or price.get("StrikethroughPrice"))
             explicit_current = parse_decimal(
                 price.get("DiscountedPrice")
                 or price.get("SalePrice")
@@ -628,25 +651,44 @@ def parse_xbox_catalog(payload: dict[str, Any], url: str) -> Offer:
                 or price.get("WholesalePrice")
             )
             discount = find_discount_percent(availability)
+            savings = find_promotional_savings(availability)
 
             current = explicit_current
-            if current is None and original is not None and discount:
-                current = round(original * (1 - discount / 100), 2)
+            if current is None and list_price is not None and discount:
+                current = round(list_price * (1 - discount / 100), 2)
             if current is None:
-                current = original
+                current = list_price or msrp
             if current is None or current <= 0:
                 continue
 
-            if best_offer is None or current < best_offer[3]:
-                best_offer = (price, availability, discount, current)
+            inferred_original = None
+            if savings is not None and savings > 0:
+                inferred_original = round(current + savings, 2)
+            original_candidate = max(
+                candidate
+                for candidate in (list_price, msrp, inferred_original, current)
+                if candidate is not None
+            )
+            if discount is None and original_candidate > 0 and original_candidate > current:
+                discount = int(round((1 - (current / original_candidate)) * 100))
+
+            # Prefer the public promotional offer advertised with the largest saving.
+            # Xbox can also expose secondary/member prices where ListPrice is already
+            # reduced, which otherwise look cheaper but hide the actual sale details.
+            rank = (savings or 0, discount or 0, -current)
+            if best_offer is None or rank > best_offer[0]:
+                best_offer = (rank, price, availability, discount, current, inferred_original)
 
     if best_offer is None:
         raise ParseError("Xbox catalog API pricing data not found")
 
-    best_price, best_availability, discount, current = best_offer
-    original = parse_decimal(best_price.get("ListPrice"))
+    _, best_price, best_availability, discount, current, inferred_original = best_offer
+    original = inferred_original or parse_decimal(best_price.get("MSRP") or best_price.get("StrikethroughPrice"))
+    list_price = parse_decimal(best_price.get("ListPrice"))
     if original is None or original < current:
-        original = parse_decimal(best_price.get("MSRP") or best_price.get("StrikethroughPrice"))
+        original = list_price
+    if list_price is not None and list_price > (original or 0):
+        original = list_price
     currency = best_price.get("CurrencyCode")
 
     if discount is None and current is not None and original and original > 0:
