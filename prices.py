@@ -39,6 +39,10 @@ EPIC_LOCALE = "en-US"
 EPIC_COUNTRY = "US"
 EPIC_PRODUCT_SLUG = "might-and-magic-heroes-3"
 
+XBOX_PRODUCT_ID = "9P96BJ164SL8"
+XBOX_MARKET = "US"
+XBOX_LANGUAGE = "en-us"
+
 CURRENCY_SIGNS = {
     "$": "USD",
     "€": "EUR",
@@ -168,6 +172,12 @@ def maybe_iso_datetime(value: Optional[str]) -> Optional[str]:
     return raw
 
 
+def fetch_json(url: str) -> dict[str, Any]:
+    request = urlrequest.Request(url, headers={**HEADERS, "Accept": "application/json"})
+    with urlrequest.urlopen(request, timeout=TIMEOUT) as response:
+        return json.loads(response.read().decode(response.headers.get_content_charset() or "utf-8"))
+
+
 def fetch(url: str) -> str:
     request = urlrequest.Request(url, headers=HEADERS)
     with urlrequest.urlopen(request, timeout=TIMEOUT) as response:
@@ -197,23 +207,6 @@ def cents_to_money(value: Any, decimals: int = 2) -> Optional[float]:
     if amount is None:
         return None
     return round(amount / (10**decimals), decimals)
-
-
-def find_json_ld_blocks(html: str) -> list[Any]:
-    blocks: list[Any] = []
-    for match in re.finditer(
-        r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
-        html,
-        flags=re.DOTALL | re.IGNORECASE,
-    ):
-        raw = match.group(1).strip()
-        if not raw:
-            continue
-        try:
-            blocks.append(json.loads(raw))
-        except json.JSONDecodeError:
-            continue
-    return blocks
 
 
 def walk_json(value: Any):
@@ -296,20 +289,19 @@ def parse_ubisoft(html: str, url: str) -> Offer:
     discount_match = re.search(r"-(\d{1,3})%", window)
     discount = int(discount_match.group(1)) if discount_match else None
 
-    end_match = re.search(
-        r"(?:Ending|Ends?|Offer ends)\s+on\s+(.+?)(?:\s+-\d{1,3}%|\s+(?:[$€£]|USD|EUR|GBP|CZK)|$)",
+    date_pattern = (
+        r"\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|"
+        r"October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)"
+        r"\s+at\s+\d{1,2}:\d{2}"
+    )
+    concise_end_match = re.search(
+        rf"(?:Ending|Ends?|Offer ends)\s+on\s+({date_pattern})",
         window,
         flags=re.IGNORECASE,
     )
-    sale_end = maybe_iso_datetime(end_match.group(1)) if end_match else None
-    if sale_end is None:
-        concise_end_match = re.search(
-            r"\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+at\s+\d{1,2}:\d{2})\b",
-            window,
-            flags=re.IGNORECASE,
-        )
-        if concise_end_match:
-            sale_end = maybe_iso_datetime(concise_end_match.group(1))
+    if concise_end_match is None:
+        concise_end_match = re.search(rf"\b({date_pattern})\b", window, flags=re.IGNORECASE)
+    sale_end = maybe_iso_datetime(concise_end_match.group(1)) if concise_end_match else None
     if sale_end is None:
         sale_end_patterns = [
             r'"(?:endDate|saleEndDate|discountEndDate|promotionEndDate|validTo)"\s*:\s*"([^"]+)"',
@@ -498,75 +490,86 @@ def parse_epic(html: str, url: str) -> Offer:
     )
 
 
-def parse_xbox(html: str, url: str) -> Offer:
-    current = original = None
-    discount = None
-    currency = None
-    sale_end = None
-
-    # Prefer schema.org JSON-LD because it is stable in saved page source.
-    for block in find_json_ld_blocks(html):
-        for node in walk_json(block):
-            if not isinstance(node, dict):
+def find_discount_percent(value: Any) -> Optional[int]:
+    for node in walk_json(value):
+        if not isinstance(node, dict):
+            continue
+        for key, raw_value in node.items():
+            lowered = key.lower()
+            if "discount" not in lowered:
                 continue
-            offers = node.get("offers")
-            if not isinstance(offers, list):
+            parsed = parse_decimal(raw_value)
+            if parsed is None and isinstance(raw_value, str):
+                match = re.search(r"(\d{1,3})(?:\.\d+)?\s*%", raw_value)
+                if match:
+                    parsed = parse_decimal(match.group(1))
+            if parsed is None:
                 continue
-            paid_offers: list[dict[str, Any]] = []
-            for offer in offers:
-                if not isinstance(offer, dict):
-                    continue
-                price = parse_decimal(offer.get("price"))
-                if price is None or price <= 0:
-                    continue
-                paid_offers.append(offer)
-            if paid_offers:
-                primary = paid_offers[0]
-                current = parse_decimal(primary.get("price"))
-                currency = primary.get("priceCurrency")
-                break
-        if current is not None:
-            break
+            if "percent" in lowered or "percentage" in lowered:
+                return int(round(parsed))
+            if 0 < parsed <= 1:
+                return int(round(parsed * 100))
+            if 1 < parsed <= 100 and not any(token in lowered for token in ("price", "amount")):
+                return int(round(parsed))
+    return None
 
-    if current is None:
-        preloaded_state_match = re.search(
-            r"window\.__PRELOADED_STATE__\s*=\s*(\{.*?\})\s*;</script>",
-            html,
-            flags=re.DOTALL,
-        )
-        if preloaded_state_match:
-            raw = preloaded_state_match.group(1)
-            try:
-                state = json.loads(raw)
-            except json.JSONDecodeError:
-                state = None
-            if state is not None:
-                for node in walk_json(state):
-                    if not isinstance(node, dict):
-                        continue
-                    price = node.get("price")
-                    if isinstance(price, dict):
-                        current = parse_decimal(
-                            price.get("listPrice")
-                            or price.get("price")
-                            or price.get("discountedPrice")
-                        )
-                        original = parse_decimal(price.get("msrp") or price.get("basePrice"))
-                        currency = price.get("currencyCode") or currency
-                        if current is not None:
-                            discount_value = price.get("discountPercentage")
-                            if discount_value is not None:
-                                discount = int(discount_value)
-                            break
+
+def xbox_catalog_api(product_id: str = XBOX_PRODUCT_ID) -> dict[str, Any]:
+    url = (
+        "https://displaycatalog.mp.microsoft.com/v7.0/products"
+        f"?bigIds={product_id}&market={XBOX_MARKET}&languages={XBOX_LANGUAGE}"
+    )
+    return fetch_json(url)
+
+
+def parse_xbox_catalog(payload: dict[str, Any], url: str) -> Offer:
+    products = payload.get("Products") or []
+    product = products[0] if products and isinstance(products[0], dict) else {}
+    best_offer: Optional[tuple[dict[str, Any], dict[str, Any], Optional[int], float]] = None
+
+    for sku in product.get("DisplaySkuAvailabilities") or []:
+        if not isinstance(sku, dict):
+            continue
+        for availability in sku.get("Availabilities") or []:
+            if not isinstance(availability, dict):
+                continue
+            price = (availability.get("OrderManagementData") or {}).get("Price")
+            if not isinstance(price, dict):
+                continue
+
+            original = parse_decimal(price.get("ListPrice") or price.get("MSRP"))
+            explicit_current = parse_decimal(
+                price.get("DiscountedPrice")
+                or price.get("SalePrice")
+                or price.get("PurchasePrice")
+                or price.get("WholesalePrice")
+            )
+            discount = find_discount_percent(availability)
+
+            current = explicit_current
+            if current is None and original is not None and discount:
+                current = round(original * (1 - discount / 100), 2)
+            if current is None:
+                current = original
+            if current is None or current <= 0:
+                continue
+
+            if best_offer is None or current < best_offer[3]:
+                best_offer = (price, availability, discount, current)
+
+    if best_offer is None:
+        raise ParseError("Xbox catalog API pricing data not found")
+
+    best_price, _best_availability, discount, current = best_offer
+    original = parse_decimal(best_price.get("ListPrice"))
+    if original is None or original < current:
+        original = parse_decimal(best_price.get("MSRP") or best_price.get("StrikethroughPrice"))
+    currency = best_price.get("CurrencyCode")
 
     if discount is None and current is not None and original and original > 0:
         discount = int(round((1 - (current / original)) * 100))
-
-    notes = (
-        "Parsed from JSON-LD and preloaded state when available."
-        if current is not None
-        else "Xbox pricing was not found in the fetched HTML snapshot."
-    )
+    if original is None and current is not None and discount and discount < 100:
+        original = round(current / (1 - discount / 100), 2)
 
     return Offer(
         store="Xbox",
@@ -575,9 +578,9 @@ def parse_xbox(html: str, url: str) -> Offer:
         current_price=current,
         original_price=original,
         discount_percent=discount,
-        sale_end=sale_end,
-        availability="ok" if current is not None else "parser_warning",
-        notes=notes,
+        sale_end=None,
+        availability="ok",
+        notes="Parsed from Microsoft Display Catalog API.",
     )
 
 
@@ -589,13 +592,14 @@ def fetch_offer(store: str, url: str) -> Offer:
             html = fetch(url)
             return parse_epic(html, url)
 
+    if store == "Xbox":
+        return parse_xbox_catalog(xbox_catalog_api(), url)
+
     html = fetch(url)
     if store == "GOG":
         return parse_gog(html, url)
     if store == "Ubisoft":
         return parse_ubisoft(html, url)
-    if store == "Xbox":
-        return parse_xbox(html, url)
     raise ValueError(f"Unsupported store: {store}")
 
 
