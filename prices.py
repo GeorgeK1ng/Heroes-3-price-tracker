@@ -217,7 +217,10 @@ def maybe_iso_datetime(value: Optional[str]) -> Optional[str]:
 
 
 def find_sale_end_datetime(value: Any) -> Optional[str]:
-    date_key_pattern = re.compile(r"(?:end|validto|expire|expiration)", flags=re.IGNORECASE)
+    promotional_date_key_pattern = re.compile(
+        r"(?=.*(?:end|validto|expire|expiration))(?=.*(?:promo|promotion|sale|discount|deal|offer))",
+        flags=re.IGNORECASE,
+    )
     text_end_pattern = re.compile(
         r"(?:Offer\s+ends\s+on|Ends?\s+on|Ending\s+on|Sale\s+ends|ends?\s+in)\s*:?\s*"
         r"([^.;|<>{}\[\]]+)",
@@ -228,7 +231,7 @@ def find_sale_end_datetime(value: Any) -> Optional[str]:
         if not isinstance(node, dict):
             continue
         for key, raw_value in node.items():
-            if date_key_pattern.search(key) and isinstance(raw_value, str):
+            if promotional_date_key_pattern.search(key) and isinstance(raw_value, str):
                 parsed = maybe_iso_datetime(raw_value)
                 if parsed:
                     return parsed

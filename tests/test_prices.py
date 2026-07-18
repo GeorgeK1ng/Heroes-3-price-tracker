@@ -53,3 +53,39 @@ def test_parse_xbox_catalog_reads_relative_sale_end_text():
     assert offer.sale_end is not None
     parsed = datetime.fromisoformat(offer.sale_end)
     assert 1.99 <= (parsed - before).total_seconds() / 86400 <= 2.01
+
+
+def test_parse_xbox_catalog_ignores_non_promotional_availability_end_date():
+    before = datetime.now(timezone.utc)
+    payload = {
+        "Products": [
+            {
+                "DisplaySkuAvailabilities": [
+                    {
+                        "Availabilities": [
+                            {
+                                "Conditions": {"EndDate": "9998-12-30T23:59:59.0000000Z"},
+                                "OrderManagementData": {
+                                    "Price": {
+                                        "ListPrice": 9.99,
+                                        "DiscountedPrice": 2.49,
+                                        "CurrencyCode": "USD",
+                                    }
+                                },
+                                "Properties": {
+                                    "PromotionDescription": "On sale: save $7.50, ends in 2 days"
+                                },
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+
+    offer = parse_xbox_catalog(payload, "https://www.xbox.com/example")
+
+    assert offer.sale_end is not None
+    parsed = datetime.fromisoformat(offer.sale_end)
+    assert parsed.year != 9998
+    assert 1.99 <= (parsed - before).total_seconds() / 86400 <= 2.01
