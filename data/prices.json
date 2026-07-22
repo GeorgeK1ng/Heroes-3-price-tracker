@@ -1,19 +1,7 @@
 {
-  "checked_at": "2026-07-21T08:42:00+00:00",
+  "checked_at": "2026-07-22T08:41:43+00:00",
   "game": "Heroes of Might and Magic III Complete",
   "offers": [
-    {
-      "store": "Xbox",
-      "url": "https://www.xbox.com/en-US/games/store/heroes-of-might-and-magic-3-complete-edition/9P96BJ164SL8",
-      "currency": "USD",
-      "current_price": 1.74,
-      "original_price": 9.99,
-      "discount_percent": 83,
-      "sale_end": null,
-      "availability": "ok",
-      "notes": "Parsed from Microsoft Display Catalog API.",
-      "savings": 8.25
-    },
     {
       "store": "Ubisoft",
       "url": "https://store.ubisoft.com/ie/heroes-of-might-and-magic-iii--complete/575ffd9ba3be1633568b4d8c.html",
@@ -49,7 +37,21 @@
       "availability": "ok",
       "notes": "Parsed from Epic GraphQL store data.",
       "savings": 0.0
+    },
+    {
+      "store": "Xbox",
+      "url": "https://www.xbox.com/en-US/games/store/heroes-of-might-and-magic-3-complete-edition/9P96BJ164SL8",
+      "currency": null,
+      "current_price": null,
+      "original_price": null,
+      "discount_percent": null,
+      "sale_end": null,
+      "availability": "error",
+      "notes": "ParseError: Xbox catalog API pricing data not found",
+      "savings": null
     }
   ],
-  "errors": []
+  "errors": [
+    "Xbox: ParseError: Xbox catalog API pricing data not found"
+  ]
 }
