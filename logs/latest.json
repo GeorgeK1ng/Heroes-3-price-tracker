@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-08-31T13:40:30+00:00",
+  "checked_at": "2026-09-01T11:34:40+00:00",
   "game": "Heroes of Might and Magic III Complete",
   "offers": [
     {
@@ -20,7 +20,7 @@
       "currency": "USD",
       "current_price": 9.99,
       "original_price": 17.99,
-      "discount_percent": 75,
+      "discount_percent": 44,
       "sale_end": null,
       "availability": "ok",
       "notes": "Parsed from the visible product pricing block.",
