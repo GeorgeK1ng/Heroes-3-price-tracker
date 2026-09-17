@@ -1,7 +1,19 @@
 {
-  "checked_at": "2026-09-16T11:26:21+00:00",
+  "checked_at": "2026-09-17T11:35:44+00:00",
   "game": "Heroes of Might and Magic III Complete",
   "offers": [
+    {
+      "store": "Epic",
+      "url": "https://store.epicgames.com/en-US/p/might-and-magic-heroes-3",
+      "currency": "USD",
+      "current_price": 2.49,
+      "original_price": 9.99,
+      "discount_percent": 75,
+      "sale_end": "2026-10-01T10:01:00.000Z",
+      "availability": "ok",
+      "notes": "Parsed from Epic GraphQL store data.",
+      "savings": 7.5
+    },
     {
       "store": "Ubisoft",
       "url": "https://store.ubisoft.com/ie/heroes-of-might-and-magic-iii--complete/575ffd9ba3be1633568b4d8c.html",
@@ -15,28 +27,16 @@
       "savings": 7.49
     },
     {
-      "store": "Epic",
-      "url": "https://store.epicgames.com/en-US/p/might-and-magic-heroes-3",
-      "currency": "USD",
-      "current_price": 9.99,
-      "original_price": 9.99,
-      "discount_percent": 0,
-      "sale_end": null,
-      "availability": "ok",
-      "notes": "Parsed from Epic GraphQL store data.",
-      "savings": 0.0
-    },
-    {
       "store": "GOG",
       "url": "https://www.gog.com/en/game/heroes_of_might_and_magic_3_complete_edition",
       "currency": null,
-      "current_price": 9.99,
+      "current_price": 4.99,
       "original_price": 9.99,
-      "discount_percent": 0,
-      "sale_end": null,
+      "discount_percent": 50,
+      "sale_end": "09/24/2026 15:59 EEST",
       "availability": "ok",
       "notes": "Parsed from public product page data.",
-      "savings": 0.0
+      "savings": 5.0
     },
     {
       "store": "Xbox",
